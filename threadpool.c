@@ -11,6 +11,7 @@ struct task {
 };
 
 struct threadpool {
+  int num_threads;
   pthread_t *threads;
 
   struct task *queue;
@@ -35,12 +36,16 @@ struct threadpool *threadpool_create(size_t num_threads, size_t queue_size) {
   }
   if((pool->threads = malloc(sizeof(pthread_t) * num_threads)) == NULL){
     fprintf(stderr, "Error in allocating memory to threadpool threads\n");
+    free(pool);
     return NULL;
   }
   if((pool->queue = malloc(sizeof(struct task) * queue_size)) == NULL){
     fprintf(stderr, "Error in allocating memory to threadpool threads\n");
+    free(pool->threads);
+    free(pool);
     return NULL;
   }
+  pool->num_threads = num_threads;
   pool->queue_size = queue_size;
   pool->head = 0;
   pool->tail = 0;
@@ -59,8 +64,11 @@ struct threadpool *threadpool_create(size_t num_threads, size_t queue_size) {
     return NULL;
   }
 
-  for(int i = 0; i < num_threads; i++){
-    pthread_create(&pool->threads[i], NULL, worker, pool);
+  for(size_t i = 0; i < num_threads; i++){
+    if(pthread_create(&pool->threads[i], NULL, worker, pool) != 0){
+      fprintf(stderr, "Error in creating threads\n");
+      return NULL;
+    }
   }
   return pool;
 }
@@ -71,7 +79,7 @@ void threadpool_submit(struct threadpool *pool, void (*function)(void*), void *a
     fprintf(stderr, "Threadpool queue full\n");
     pthread_cond_wait(&pool->queue_not_full, &pool->queue_lock);
   }
-  if(pool->shutdown = 1){
+  if(pool->shutdown){
     pthread_mutex_unlock(&pool->queue_lock);
     return;
   }
@@ -95,6 +103,7 @@ static void *worker(void *arg){
     }
     if(pool->shutdown && pool->count == 0){
       pthread_mutex_unlock(&pool->queue_lock);
+      break;
     }
     task = pool->queue[pool->head];
     pool->head = (pool->head + 1) % pool->queue_size;
@@ -106,3 +115,19 @@ static void *worker(void *arg){
   return NULL;
 }
 
+void threadpool_destroy(struct threadpool *pool){
+  pthread_mutex_lock(&pool->queue_lock);
+  pool->shutdown = 1;
+  pthread_cond_broadcast(&pool->queue_not_empty);
+  pthread_cond_broadcast(&pool->queue_not_full);
+  pthread_mutex_unlock(&pool->queue_lock);
+  for(size_t i = 0; i < pool->num_threads; i++){
+    pthread_join(pool->threads[i], NULL);
+  }
+  pthread_mutex_destroy(&pool->queue_lock);
+  pthread_cond_destroy(&pool->queue_not_empty);
+  pthread_cond_destroy(&pool->queue_not_full);
+  free(pool->threads);
+  free(pool->queue);
+  free(pool);
+}
