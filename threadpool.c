@@ -5,6 +5,10 @@
 #include <pthread.h>
 #include <unistd.h>
 
+#define THREADPOOL_SUBMIT_SUCCESS 0
+#define THREADPOOL_SHUTDOWN -1
+#define THREADPOOL_QUEUE_FULL -2
+
 struct task {
   void (*function)(void *);
   void *args;
@@ -82,8 +86,8 @@ struct threadpool *threadpool_create(size_t num_threads, size_t queue_size) {
       pool->shutdown = 1;
 
       pthread_cond_broadcast(&pool->queue_not_empty);
-      
-      for(size_t j = 0; j < i; j++){
+
+      for (size_t j = 0; j < i; j++) {
         pthread_join(pool->threads[j], NULL);
       }
 
@@ -100,25 +104,57 @@ struct threadpool *threadpool_create(size_t num_threads, size_t queue_size) {
   return pool;
 }
 
-void threadpool_submit(struct threadpool *pool, void (*function)(void *),
-                       void *arg) {
+int threadpool_submit(struct threadpool *pool, void (*function)(void *),
+                      void *arg) {
   pthread_mutex_lock(&pool->queue_lock);
-  while (pool->count == pool->queue_size) {
-    fprintf(stderr, "Threadpool queue full\n");
+
+  while (pool->count == pool->queue_size && !pool->shutdown) {
+    // fprintf(stderr, "Threadpool queue full\n");
     pthread_cond_wait(&pool->queue_not_full, &pool->queue_lock);
   }
+
   if (pool->shutdown) {
     pthread_mutex_unlock(&pool->queue_lock);
-    return;
+    return THREADPOOL_SHUTDOWN;
   }
+  
   struct task task;
   task.args = arg;
   task.function = function;
   pool->queue[pool->tail] = task;
   pool->tail = (pool->tail + 1) % pool->queue_size;
   pool->count++;
+
   pthread_cond_signal(&pool->queue_not_empty);
   pthread_mutex_unlock(&pool->queue_lock);
+
+  return THREADPOOL_SUBMIT_SUCCESS;
+}
+
+int threadpool_try_submit(struct threadpool *pool, void (*function)(void *),
+                          void *arg) {
+  pthread_mutex_lock(&pool->queue_lock);
+
+  if (pool->shutdown) {
+    pthread_mutex_unlock(&pool->queue_lock);
+    return THREADPOOL_SHUTDOWN;
+  }
+  if (pool->count == pool->queue_size) {
+    pthread_mutex_unlock(&pool->queue_lock);
+    return THREADPOOL_QUEUE_FULL;
+  }
+
+  struct task task;
+  task.args = arg;
+  task.function = function;
+  pool->queue[pool->tail] = task;
+  pool->tail = (pool->tail + 1) % pool->queue_size;
+  pool->count++;
+
+  pthread_cond_signal(&pool->queue_not_empty);
+  pthread_mutex_unlock(&pool->queue_lock);
+
+  return THREADPOOL_SUBMIT_SUCCESS;
 }
 
 static void *worker(void *arg) {

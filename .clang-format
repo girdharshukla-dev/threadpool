@@ -1,3 +1,4 @@
 BreakBeforeBraces: Attach
 SortIncludes: false
 IndentWidth: 2
+UseTab: Never
