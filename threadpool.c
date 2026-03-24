@@ -107,6 +107,7 @@ struct threadpool *threadpool_create(size_t num_threads, size_t queue_size) {
       pthread_mutex_destroy(&pool->queue_lock);
       pthread_cond_destroy(&pool->queue_not_empty);
       pthread_cond_destroy(&pool->queue_not_full);
+      pthread_cond_destroy(&pool->all_done);
 
       free(pool->threads);
       free(pool->queue);
@@ -196,7 +197,13 @@ static void *worker(void *arg) {
     pthread_mutex_lock(&pool->queue_lock);
     pool->tasks_in_progress--;
     if(pool->tasks_in_progress == 0 && pool->count == 0){
-      pthread_cond_signal(&pool->all_done);
+      pthread_cond_broadcast(&pool->all_done);
+      // there might be case where signal is a problem, like assume there are thread A and thread B
+      // who called threadpool_wait, for instance the condition variable is signaled not broadcasted
+      // thread A might wake up, exit the function and thread B might still sleep since it wasnt 
+      // broadcasted, since thread A is now free, it may submit new tasks and when thread B checks for
+      // condition all_done condition variable whenever, it may still see some tasks in progress 
+      // and again go to sleep and this can continue and thread B might always go to sleep
     }
     pthread_mutex_unlock(&pool->queue_lock);
     
