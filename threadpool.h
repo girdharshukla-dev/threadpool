@@ -1,6 +1,12 @@
 #ifndef THREADPOOL_H
 #define THREADPOOL_H
 
+#include <stddef.h>
+
+#define THREADPOOL_SUBMIT_SUCCESS 0
+#define THREADPOOL_SHUTDOWN -1
+#define THREADPOOL_QUEUE_FULL -2
+
 struct threadpool;
 
 struct threadpool *threadpool_create(size_t num_threads, size_t queue_size);

@@ -4,10 +4,7 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <unistd.h>
-
-#define THREADPOOL_SUBMIT_SUCCESS 0
-#define THREADPOOL_SHUTDOWN -1
-#define THREADPOOL_QUEUE_FULL -2
+#include <stddef.h>
 
 struct task {
   void (*function)(void *);
@@ -15,7 +12,7 @@ struct task {
 };
 
 struct threadpool {
-  int num_threads;
+  size_t num_threads;
   pthread_t *threads;
 
   struct task *queue;
