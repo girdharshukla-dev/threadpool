@@ -2,3 +2,4 @@ BreakBeforeBraces: Attach
 SortIncludes: false
 IndentWidth: 2
 UseTab: Never
+ColumnLimit: 100
