@@ -48,7 +48,7 @@ struct threadpool *threadpool_create(size_t num_workers, size_t queue_size) {
     return NULL;
   }
 
-  if (pthread_cond_init(&pool->all_done, &pool->threadpool_lock) != 0) {
+  if (pthread_cond_init(&pool->all_done, NULL) != 0) {
     free(pool->workers);
     free(pool);
     return NULL;
