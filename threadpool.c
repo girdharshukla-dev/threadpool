@@ -11,50 +11,63 @@ struct task {
   void *args;
 };
 
-struct threadpool {
-  size_t num_threads;
-  pthread_t *threads;
+struct worker {
+  pthread_t thread;
 
   struct task *queue;
-  int queue_size;
+
   int head;
   int tail;
   int count;
-  int shutdown;
-  int tasks_in_progress;
-
+  
   pthread_mutex_t queue_lock;
   pthread_cond_t queue_not_empty;
   pthread_cond_t queue_not_full;
+
+};
+
+struct threadpool {
+  size_t num_workers;
+  struct worker *workers;
+
+  int queue_size;
+
+  int shutdown;
+  int tasks_in_progress;
+
   pthread_cond_t all_done;
 };
 
 static void *worker(void *arg);
 
-struct threadpool *threadpool_create(size_t num_threads, size_t queue_size) {
+struct threadpool *threadpool_create(size_t num_workers, size_t queue_size) {
   struct threadpool *pool;
   if ((pool = malloc(sizeof(*pool))) == NULL) {
     fprintf(stderr, "Error in allocating memory to threadpool\n");
     return NULL;
   }
-  if ((pool->threads = malloc(sizeof(pthread_t) * num_threads)) == NULL) {
-    fprintf(stderr, "Error in allocating memory to threadpool threads\n");
+
+  if((pool->workers = malloc(sizeof(struct worker) * num_workers)) == NULL){
+    fprintf(stderr, "Error in allocating memory to workers\n");
     free(pool);
     return NULL;
   }
-  if ((pool->queue = malloc(sizeof(struct task) * queue_size)) == NULL) {
-    fprintf(stderr, "Error in allocating memory to threadpool threads\n");
-    free(pool->threads);
-    free(pool);
-    return NULL;
-  }
-  pool->num_threads = num_threads;
+
+  pool->num_workers = num_workers;
   pool->queue_size = queue_size;
-  pool->head = 0;
-  pool->tail = 0;
-  pool->count = 0;
   pool->tasks_in_progress = 0;
   pool->shutdown = 0;
+
+  for(size_t i = 0; i < num_workers; i++){
+    struct worker *worker = &pool->workers[i];
+    worker->head = 0;
+    worker->tail = 0;
+    worker->count = 0;
+    if((worker->queue = malloc(queue_size * sizeof(struct task))) == NULL){
+      
+    }
+  }
+
   if (pthread_mutex_init(&pool->queue_lock, NULL) != 0) {
     fprintf(stderr, "Error in pthread_mutex_init of threadpool\n");
     free(pool->threads);

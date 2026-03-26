@@ -9,7 +9,7 @@
 
 struct threadpool;
 
-struct threadpool *threadpool_create(size_t num_threads, size_t queue_size);
+struct threadpool *threadpool_create(size_t num_workers, size_t queue_size);
 int threadpool_submit(struct threadpool *pool, void (*function)(void*), void *arg);
 int threadpool_try_submit(struct threadpool *pool, void (*function)(void*), void *arg);
 void threadpool_wait(struct threadpool *pool);
