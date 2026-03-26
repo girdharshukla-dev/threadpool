@@ -15,6 +15,7 @@ struct worker {
   pthread_t thread;
 
   struct task *queue;
+  struct threadpool *threadpool;
 
   int head;
   int tail;
@@ -33,7 +34,7 @@ struct threadpool {
 
   int current_worker;
   int shutdown;
-  int tasks_in_progress;
+  int total_tasks;
 
   pthread_mutex_t threadpool_lock;
   pthread_cond_t all_done;
@@ -47,8 +48,21 @@ struct threadpool *threadpool_create(size_t num_workers, size_t queue_size) {
     fprintf(stderr, "Error in allocating memory to threadpool\n");
     return NULL;
   }
+  
+  if((pool->workers = malloc(sizeof(struct worker) * num_workers)) == NULL){
+    fprintf(stderr, "Error in allocating memory to threadpool workers\n");
+    free(pool);
+    return NULL;  
+  }
+  
+  if(pthread_mutex_init(&pool->threadpool_lock, NULL) != 0){
+    free(pool->workers);
+    free(pool);
+    return NULL;
+  }
 
   if (pthread_cond_init(&pool->all_done, NULL) != 0) {
+    pthread_mutex_destroy(&pool->threadpool_lock);
     free(pool->workers);
     free(pool);
     return NULL;
@@ -56,40 +70,50 @@ struct threadpool *threadpool_create(size_t num_workers, size_t queue_size) {
 
   pool->num_workers = num_workers;
   pool->queue_size = queue_size;
-  pool->tasks_in_progress = 0;
   pool->shutdown = 0;
   pool->current_worker = 0;
 
   for (int i = 0; i < num_workers; i++) {
     struct worker *worker = &pool->workers[i];
+    worker->threadpool = pool;
     if (worker_init(worker, queue_size) != 0) {
       fprintf(stderr, "Failed in worker_init\n");
       for (int j = 0; j < i; j++) {
-        free(&pool->workers[j]);
+        free(pool->workers[j].queue);
+        pthread_mutex_destroy(&pool->workers[j].queue_lock);
+        pthread_cond_destroy(&pool->workers[j].queue_not_empty);
+        pthread_cond_destroy(&pool->workers[j].queue_not_full);
       }
+      free(pool->workers);
+      pthread_mutex_destroy(&pool->threadpool_lock);
+      pthread_cond_destroy(&pool->all_done);
       free(pool);
       return NULL;
     }
   }
 
   for (size_t i = 0; i < num_workers; i++) {
-    if (pthread_create(&pool->workers[i].thread, NULL, worker_func, pool) != 0) {
+    if (pthread_create(&pool->workers[i].thread, NULL, worker_func, &pool->workers[i]) != 0) {
       fprintf(stderr, "Error in creating worker threads\n");
-      pool->shutdown = 1;
 
-      pthread_cond_broadcast(&pool->queue_not_empty);
-
-      for (size_t j = 0; j < i; j++) {
-        pthread_join(pool->threads[j], NULL);
+      for (int j = 0; j <= i; j++) {
+        pthread_mutex_lock(&pool->workers[j].queue_lock);
+        pool->shutdown = 1;
+        pthread_cond_broadcast(&pool->workers[j].queue_not_empty);
+        pthread_mutex_unlock(&pool->workers[j].queue_lock);
       }
 
-      pthread_mutex_destroy(&pool->queue_lock);
-      pthread_cond_destroy(&pool->queue_not_empty);
-      pthread_cond_destroy(&pool->queue_not_full);
-      pthread_cond_destroy(&pool->all_done);
+      for (size_t j = 0; j < i; j++) {
+        pthread_join(pool->workers[j].thread, NULL);
+        pthread_mutex_destroy(&pool->workers[j].queue_lock);
+        pthread_cond_destroy(&pool->workers[j].queue_not_empty);
+        pthread_cond_destroy(&pool->workers[j].queue_not_full);
+        free(pool->workers[j].queue);
+      }
 
-      free(pool->threads);
-      free(pool->queue);
+      pthread_mutex_destroy(&pool->threadpool_lock);
+      pthread_cond_destroy(&pool->all_done);
+      free(pool->workers);
       free(pool);
       return NULL;
     }
@@ -131,7 +155,7 @@ int threadpool_submit(struct threadpool *pool, void (*function)(void *), void *a
     return THREADPOOL_SHUTDOWN;
   }
   int worker_index = pool->current_worker;
-  pool->current_worker = (pool->current_worker + 1) % pool->queue_size;
+  pool->current_worker = (pool->current_worker + 1) % pool->num_workers;
 
   pthread_mutex_unlock(&pool->threadpool_lock);
 
@@ -141,7 +165,8 @@ int threadpool_submit(struct threadpool *pool, void (*function)(void *), void *a
   while (worker->count == pool->queue_size && !pool->shutdown) {
     pthread_cond_wait(&worker->queue_not_full, &worker->queue_lock);
   }
-  if (&pool->shutdown) {
+  if (pool->shutdown) {
+    pthread_mutex_unlock(&worker->queue_lock);
     return THREADPOOL_SHUTDOWN;
   }
 
@@ -149,6 +174,7 @@ int threadpool_submit(struct threadpool *pool, void (*function)(void *), void *a
   worker->queue[worker->tail] = task;
   worker->tail = (worker->tail + 1) % pool->queue_size;
   worker->count++;
+  pool->total_tasks++;
 
   pthread_cond_signal(&worker->queue_not_empty);
   pthread_mutex_unlock(&worker->queue_lock);
@@ -163,93 +189,91 @@ int threadpool_try_submit(struct threadpool *pool, void (*function)(void *), voi
     pthread_mutex_unlock(&pool->threadpool_lock);
     return THREADPOOL_SHUTDOWN;
   }
+
   int worker_index = pool->current_worker;
-  
-  
   struct worker *worker = &pool->workers[worker_index];
-  
+
   pthread_mutex_lock(&worker->queue_lock);
   if (worker->count == pool->queue_size) {
+    pthread_mutex_unlock(&worker->queue_lock);
     return THREADPOOL_QUEUE_FULL;
   }
-  
+
   struct task task = {.function = function, .args = arg};
   worker->queue[worker->tail] = task;
-  worker->tail = (worker->tail + 1) % pool->queue_size;
+  worker->tail = (worker->tail + 1) % pool->num_workers;
   worker->count++;
+
   
   pool->current_worker = (pool->current_worker + 1) % pool->queue_size;
 
   pthread_cond_signal(&worker->queue_not_empty);
   pthread_mutex_unlock(&worker->queue_lock);
   pthread_mutex_unlock(&pool->threadpool_lock);
-  
+
   return THREADPOOL_SUBMIT_SUCCESS;
 }
 
 static void *worker_func(void *arg) {
-  struct threadpool *pool = arg;
+  struct worker *worker = arg;
+  struct threadpool *pool = worker->threadpool;
   while (1) {
     struct task task;
-    pthread_mutex_lock(&pool->queue_lock);
-    while (pool->count == 0 && !pool->shutdown) {
-      pthread_cond_wait(&pool->queue_not_empty, &pool->queue_lock);
+    pthread_mutex_lock(&worker->queue_lock);
+    while (worker->count == 0 && !pool->shutdown) {
+      pthread_cond_wait(&worker->queue_not_empty, &worker->queue_lock);
     }
-    if (pool->shutdown && pool->count == 0) {
-      pthread_mutex_unlock(&pool->queue_lock);
+    if (pool->shutdown && worker->count == 0) {
+      pthread_mutex_unlock(&worker->queue_lock);
       break;
     }
 
-    task = pool->queue[pool->head];
-    pool->head = (pool->head + 1) % pool->queue_size;
-    pool->count--;
-    pool->tasks_in_progress++;
+    task = worker->queue[worker->head];
+    worker->head = (worker->head + 1) % pool->queue_size;
+    worker->count--;
 
-    pthread_cond_signal(&pool->queue_not_full);
-    pthread_mutex_unlock(&pool->queue_lock);
+    pthread_cond_signal(&worker->queue_not_full);
+    pthread_mutex_unlock(&worker->queue_lock);
 
     task.function(task.args);
 
-    pthread_mutex_lock(&pool->queue_lock);
-    pool->tasks_in_progress--;
-    if (pool->tasks_in_progress == 0 && pool->count == 0) {
+    pthread_mutex_lock(&pool->threadpool_lock);
+    pool->total_tasks--;
+    if (pool->total_tasks == 0) {
       pthread_cond_broadcast(&pool->all_done);
-      // there might be case where signal is a problem, like assume there are
-      // thread A and thread B who called threadpool_wait, for instance the
-      // condition variable is signaled not broadcasted thread A might wake up,
-      // exit the function and thread B might still sleep since it wasnt
-      // broadcasted, since thread A is now free, it may submit new tasks and
-      // when thread B checks for condition all_done condition variable
-      // whenever, it may still see some tasks in progress and again go to sleep
-      // and this can continue and thread B might always go to sleep
     }
-    pthread_mutex_unlock(&pool->queue_lock);
+    pthread_mutex_unlock(&pool->threadpool_lock);
   }
   return NULL;
 }
 
 void threadpool_wait(struct threadpool *pool) {
-  pthread_mutex_lock(&pool->queue_lock);
-  while (pool->count > 0 || pool->tasks_in_progress > 0) {
-    pthread_cond_wait(&pool->all_done, &pool->queue_lock);
+  pthread_mutex_lock(&pool->threadpool_lock);
+  while (pool->total_tasks > 0) {
+    pthread_cond_wait(&pool->all_done, &pool->threadpool_lock);
   }
-  pthread_mutex_unlock(&pool->queue_lock);
+  pthread_mutex_unlock(&pool->threadpool_lock);
 }
 
 void threadpool_destroy(struct threadpool *pool) {
-  pthread_mutex_lock(&pool->queue_lock);
+  pthread_mutex_lock(&pool->threadpool_lock);
   pool->shutdown = 1;
-  pthread_cond_broadcast(&pool->queue_not_empty);
-  pthread_cond_broadcast(&pool->queue_not_full);
-  pthread_mutex_unlock(&pool->queue_lock);
-  for (size_t i = 0; i < pool->num_threads; i++) {
-    pthread_join(pool->threads[i], NULL);
+  for (int i = 0; i < pool->num_workers; i++) {
+    pthread_mutex_lock(&pool->workers[i].queue_lock);
+    pthread_cond_broadcast(&pool->workers[i].queue_not_empty);
+    pthread_cond_broadcast(&pool->workers[i].queue_not_full);
+    pthread_mutex_unlock(&pool->workers[i].queue_lock);
   }
-  pthread_mutex_destroy(&pool->queue_lock);
-  pthread_cond_destroy(&pool->queue_not_empty);
-  pthread_cond_destroy(&pool->queue_not_full);
+  for (size_t i = 0; i < pool->num_workers; i++) {
+    pthread_join(pool->workers[i].thread, NULL);
+  }
+  for(int i = 0; i < pool->num_workers; i++){
+    pthread_mutex_destroy(&pool->workers[i].queue_lock);
+    pthread_cond_destroy(&pool->workers[i].queue_not_empty);
+    pthread_cond_destroy(&pool->workers[i].queue_not_full);
+    free(pool->workers[i].queue);
+  }
   pthread_cond_destroy(&pool->all_done);
-  free(pool->threads);
-  free(pool->queue);
+  free(pool->workers);
   free(pool);
 }
