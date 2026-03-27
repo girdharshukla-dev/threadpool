@@ -41,6 +41,7 @@ struct threadpool {
 };
 
 static void *worker_func(void *arg);
+static int worker_init(struct worker *worker, int queue_size);
 
 struct threadpool *threadpool_create(size_t num_workers, size_t queue_size) {
   struct threadpool *pool;
@@ -122,7 +123,7 @@ struct threadpool *threadpool_create(size_t num_workers, size_t queue_size) {
   return pool;
 }
 
-int worker_init(struct worker *worker, int queue_size) {
+static int worker_init(struct worker *worker, int queue_size) {
   worker->head = 0;
   worker->tail = 0;
   worker->count = 0;
