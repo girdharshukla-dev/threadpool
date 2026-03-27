@@ -200,26 +200,27 @@ int threadpool_try_submit(struct threadpool *pool, void (*function)(void *), voi
   }
 
   int worker_index = pool->current_worker;
+  pthread_mutex_unlock(&pool->threadpool_lock);
   struct worker *worker = &pool->workers[worker_index];
-
+  
   pthread_mutex_lock(&worker->queue_lock);
   if (worker->count == pool->queue_size) {
     pthread_mutex_unlock(&worker->queue_lock);
-    pthread_mutex_unlock(&pool->threadpool_lock);
     return THREADPOOL_QUEUE_FULL;
   }
-
+  pthread_mutex_lock(&pool->threadpool_lock);
+  pool->total_tasks++;
+  pool->current_worker = (pool->current_worker + 1) % pool->num_workers;
+  pthread_mutex_unlock(&pool->threadpool_lock);
+  
   struct task task = {.function = function, .args = arg};
   worker->queue[worker->tail] = task;
   worker->tail = (worker->tail + 1) % pool->queue_size;
   worker->count++;
-  pool->total_tasks++;
   
-  pool->current_worker = (pool->current_worker + 1) % pool->num_workers;
-
+  
   pthread_cond_signal(&worker->queue_not_empty);
   pthread_mutex_unlock(&worker->queue_lock);
-  pthread_mutex_unlock(&pool->threadpool_lock);
 
   return THREADPOOL_SUBMIT_SUCCESS;
 }
