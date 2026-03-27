@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <stddef.h>
+#include <stdatomic.h>
 
 struct task {
   void (*function)(void *);
@@ -33,8 +34,8 @@ struct threadpool {
   int queue_size;
 
   int current_worker;
-  int shutdown;
-  int total_tasks;
+  _Atomic int shutdown;
+  _Atomic int total_tasks;
 
   pthread_mutex_t threadpool_lock;
   pthread_cond_t all_done;
@@ -49,14 +50,14 @@ struct threadpool *threadpool_create(size_t num_workers, size_t queue_size) {
     fprintf(stderr, "Error in allocating memory to threadpool\n");
     return NULL;
   }
-  
-  if((pool->workers = malloc(sizeof(struct worker) * num_workers)) == NULL){
+
+  if ((pool->workers = malloc(sizeof(struct worker) * num_workers)) == NULL) {
     fprintf(stderr, "Error in allocating memory to threadpool workers\n");
     free(pool);
-    return NULL;  
+    return NULL;
   }
-  
-  if(pthread_mutex_init(&pool->threadpool_lock, NULL) != 0){
+
+  if (pthread_mutex_init(&pool->threadpool_lock, NULL) != 0) {
     free(pool->workers);
     free(pool);
     return NULL;
@@ -152,7 +153,7 @@ static int worker_init(struct worker *worker, int queue_size) {
 int threadpool_submit(struct threadpool *pool, void (*function)(void *), void *arg) {
   pthread_mutex_lock(&pool->threadpool_lock);
 
-  if (pool->shutdown == 1) {
+  if (atomic_load(&pool->shutdown)) {
     pthread_mutex_unlock(&pool->threadpool_lock);
     return THREADPOOL_SHUTDOWN;
   }
@@ -164,15 +165,10 @@ int threadpool_submit(struct threadpool *pool, void (*function)(void *), void *a
   struct worker *worker = &pool->workers[worker_index];
 
   pthread_mutex_lock(&worker->queue_lock);
-  int shutdown = 0;
-  while (worker->count == pool->queue_size) {
-    pthread_mutex_lock(&pool->threadpool_lock);
-    shutdown = pool->shutdown;
-    pthread_mutex_unlock(&pool->threadpool_lock);
-    if(shutdown) break;
+  while (worker->count == pool->queue_size && !atomic_load(&pool->shutdown)) {
     pthread_cond_wait(&worker->queue_not_full, &worker->queue_lock);
   }
-  if (shutdown) {
+  if (atomic_load(&pool->shutdown)) {
     pthread_mutex_unlock(&worker->queue_lock);
     return THREADPOOL_SHUTDOWN;
   }
@@ -182,9 +178,7 @@ int threadpool_submit(struct threadpool *pool, void (*function)(void *), void *a
   worker->tail = (worker->tail + 1) % pool->queue_size;
   worker->count++;
 
-  pthread_mutex_lock(&pool->threadpool_lock);
-  pool->total_tasks++;
-  pthread_mutex_unlock(&pool->threadpool_lock);
+  atomic_fetch_add(&pool->total_tasks, 1);
 
   pthread_cond_signal(&worker->queue_not_empty);
   pthread_mutex_unlock(&worker->queue_lock);
@@ -195,7 +189,7 @@ int threadpool_submit(struct threadpool *pool, void (*function)(void *), void *a
 int threadpool_try_submit(struct threadpool *pool, void (*function)(void *), void *arg) {
   pthread_mutex_lock(&pool->threadpool_lock);
 
-  if (pool->shutdown == 1) {
+  if (atomic_load(&pool->shutdown)) {
     pthread_mutex_unlock(&pool->threadpool_lock);
     return THREADPOOL_SHUTDOWN;
   }
@@ -203,23 +197,22 @@ int threadpool_try_submit(struct threadpool *pool, void (*function)(void *), voi
   int worker_index = pool->current_worker;
   pthread_mutex_unlock(&pool->threadpool_lock);
   struct worker *worker = &pool->workers[worker_index];
-  
+
   pthread_mutex_lock(&worker->queue_lock);
   if (worker->count == pool->queue_size) {
     pthread_mutex_unlock(&worker->queue_lock);
     return THREADPOOL_QUEUE_FULL;
   }
   pthread_mutex_lock(&pool->threadpool_lock);
-  pool->total_tasks++;
+  atomic_fetch_add(&pool->total_tasks, 1);
   pool->current_worker = (pool->current_worker + 1) % pool->num_workers;
   pthread_mutex_unlock(&pool->threadpool_lock);
-  
+
   struct task task = {.function = function, .args = arg};
   worker->queue[worker->tail] = task;
   worker->tail = (worker->tail + 1) % pool->queue_size;
   worker->count++;
-  
-  
+
   pthread_cond_signal(&worker->queue_not_empty);
   pthread_mutex_unlock(&worker->queue_lock);
 
@@ -232,15 +225,10 @@ static void *worker_func(void *arg) {
   while (1) {
     struct task task;
     pthread_mutex_lock(&worker->queue_lock);
-    int shutdown = 0;
-    while (worker->count == 0) {
-      pthread_mutex_lock(&pool->threadpool_lock);
-      shutdown = pool->shutdown;
-      pthread_mutex_unlock(&pool->threadpool_lock);
-      if(shutdown) break;
+    while (worker->count == 0 && !atomic_load(&pool->shutdown)) {
       pthread_cond_wait(&worker->queue_not_empty, &worker->queue_lock);
     }
-    if (shutdown && worker->count == 0) {
+    if (atomic_load(&pool->shutdown) && worker->count == 0) {
       pthread_mutex_unlock(&worker->queue_lock);
       break;
     }
@@ -254,28 +242,25 @@ static void *worker_func(void *arg) {
 
     task.function(task.args);
 
-    pthread_mutex_lock(&pool->threadpool_lock);
-    pool->total_tasks--;
-    if (pool->total_tasks == 0) {
+    if (atomic_fetch_sub(&pool->total_tasks, 1) == 1) {
+      pthread_mutex_lock(&pool->threadpool_lock);
       pthread_cond_broadcast(&pool->all_done);
+      pthread_mutex_unlock(&pool->threadpool_lock);
     }
-    pthread_mutex_unlock(&pool->threadpool_lock);
   }
   return NULL;
 }
 
 void threadpool_wait(struct threadpool *pool) {
   pthread_mutex_lock(&pool->threadpool_lock);
-  while (pool->total_tasks > 0) {
+  while (atomic_load(&pool->total_tasks) > 0) {
     pthread_cond_wait(&pool->all_done, &pool->threadpool_lock);
   }
   pthread_mutex_unlock(&pool->threadpool_lock);
 }
 
 void threadpool_destroy(struct threadpool *pool) {
-  pthread_mutex_lock(&pool->threadpool_lock);
-  pool->shutdown = 1;
-  pthread_mutex_unlock(&pool->threadpool_lock);
+  atomic_store(&pool->shutdown, 1);
   for (int i = 0; i < pool->num_workers; i++) {
     pthread_mutex_lock(&pool->workers[i].queue_lock);
     pthread_cond_broadcast(&pool->workers[i].queue_not_empty);
@@ -285,7 +270,7 @@ void threadpool_destroy(struct threadpool *pool) {
   for (size_t i = 0; i < pool->num_workers; i++) {
     pthread_join(pool->workers[i].thread, NULL);
   }
-  for(int i = 0; i < pool->num_workers; i++){
+  for (int i = 0; i < pool->num_workers; i++) {
     pthread_mutex_destroy(&pool->workers[i].queue_lock);
     pthread_cond_destroy(&pool->workers[i].queue_not_empty);
     pthread_cond_destroy(&pool->workers[i].queue_not_full);
