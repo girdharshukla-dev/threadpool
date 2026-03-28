@@ -79,7 +79,7 @@ struct threadpool *threadpool_create(size_t num_threads, size_t queue_size) {
     free(pool);
     return NULL;
   }
-  if(pthread_cond_init(&pool->all_done, NULL) != 0){
+  if (pthread_cond_init(&pool->all_done, NULL) != 0) {
     fprintf(stderr, "Error in pthread_cond_init of all_done\n");
     free(pool->threads);
     free(pool->queue);
@@ -115,8 +115,7 @@ struct threadpool *threadpool_create(size_t num_threads, size_t queue_size) {
   return pool;
 }
 
-int threadpool_submit(struct threadpool *pool, void (*function)(void *),
-                      void *arg) {
+int threadpool_submit(struct threadpool *pool, void (*function)(void *), void *arg) {
   pthread_mutex_lock(&pool->queue_lock);
 
   while (pool->count == pool->queue_size && !pool->shutdown) {
@@ -128,7 +127,7 @@ int threadpool_submit(struct threadpool *pool, void (*function)(void *),
     pthread_mutex_unlock(&pool->queue_lock);
     return THREADPOOL_SHUTDOWN;
   }
-  
+
   struct task task;
   task.args = arg;
   task.function = function;
@@ -142,8 +141,7 @@ int threadpool_submit(struct threadpool *pool, void (*function)(void *),
   return THREADPOOL_SUBMIT_SUCCESS;
 }
 
-int threadpool_try_submit(struct threadpool *pool, void (*function)(void *),
-                          void *arg) {
+int threadpool_try_submit(struct threadpool *pool, void (*function)(void *), void *arg) {
   pthread_mutex_lock(&pool->queue_lock);
 
   if (pool->shutdown) {
@@ -180,37 +178,36 @@ static void *worker(void *arg) {
       pthread_mutex_unlock(&pool->queue_lock);
       break;
     }
-    
+
     task = pool->queue[pool->head];
     pool->head = (pool->head + 1) % pool->queue_size;
     pool->count--;
     pool->tasks_in_progress++;
-    
+
     pthread_cond_signal(&pool->queue_not_full);
     pthread_mutex_unlock(&pool->queue_lock);
-    
+
     task.function(task.args);
 
     pthread_mutex_lock(&pool->queue_lock);
     pool->tasks_in_progress--;
-    if(pool->tasks_in_progress == 0 && pool->count == 0){
+    if (pool->tasks_in_progress == 0 && pool->count == 0) {
       pthread_cond_broadcast(&pool->all_done);
       // there might be case where signal is a problem, like assume there are thread A and thread B
       // who called threadpool_wait, for instance the condition variable is signaled not broadcasted
-      // thread A might wake up, exit the function and thread B might still sleep since it wasnt 
-      // broadcasted, since thread A is now free, it may submit new tasks and when thread B checks for
-      // condition all_done condition variable whenever, it may still see some tasks in progress 
+      // thread A might wake up, exit the function and thread B might still sleep since it wasnt
+      // broadcasted, since thread A is now free, it may submit new tasks and when thread B checks
+      // for condition all_done condition variable whenever, it may still see some tasks in progress
       // and again go to sleep and this can continue and thread B might always go to sleep
     }
     pthread_mutex_unlock(&pool->queue_lock);
-    
   }
   return NULL;
 }
 
-void threadpool_wait(struct threadpool* pool){
+void threadpool_wait(struct threadpool *pool) {
   pthread_mutex_lock(&pool->queue_lock);
-  while(pool->count > 0 || pool->tasks_in_progress > 0){
+  while (pool->count > 0 || pool->tasks_in_progress > 0) {
     pthread_cond_wait(&pool->all_done, &pool->queue_lock);
   }
   pthread_mutex_unlock(&pool->queue_lock);
